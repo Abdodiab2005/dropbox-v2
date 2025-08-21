@@ -262,9 +262,16 @@ bot.onText(/\/screenshot/, async (msg) => {
         config.paths.screenshots,
         `command_screenshot_${Date.now()}.png`
       );
+      // Take viewport screenshot instead of fullPage to avoid dimension issues
       await global.currentPage.screenshot({
         path: screenshotPath,
-        fullPage: true,
+        fullPage: false,
+        clip: {
+          x: 0,
+          y: 0,
+          width: 1920,
+          height: 1080,
+        },
       });
       await bot.sendPhoto(msg.chat.id, screenshotPath, {
         caption: "Current browser state",
@@ -695,8 +702,8 @@ async function processFile(page, row, fileNumber) {
     // Wait a bit for popup to fully render
     await page.waitForTimeout(2000);
 
-    // Find the specific continue button
-    const continueButton = await page.evaluateHandle(() => {
+    // Find and click the specific continue button
+    const continueButtonClicked = await page.evaluate(() => {
       const buttons = document.querySelectorAll(
         'button[data-dig-button="true"]'
       );
@@ -708,17 +715,16 @@ async function processFile(page, row, fileNumber) {
           spanElement &&
           spanElement.textContent.includes("continue with download only")
         ) {
-          return button;
+          button.click();
+          return true;
         }
       }
-      return null;
+      return false;
     });
 
-    if (!continueButton) {
-      throw new Error("Continue button not found");
+    if (!continueButtonClicked) {
+      throw new Error("Continue button not found or could not be clicked");
     }
-
-    await continueButton.click();
 
     // Wait for download URL
     const { downloadUrl, filename } = await downloadPromise;
@@ -750,21 +756,42 @@ async function processFile(page, row, fileNumber) {
     );
     stats.failedDownloads++;
 
+    // Determine error type
+    let errorType = "GENERAL_ERROR";
+    if (error.message.includes("409_CONFLICT")) {
+      errorType = "409_CONFLICT";
+      // 409 errors are already tracked in interceptDownloadUrl
+    } else if (error.message.includes("Continue button")) {
+      errorType = "POPUP_ERROR";
+      await Logger.warning("This is a popup/button error, NOT a 409 conflict");
+    } else if (error.message.includes("timeout")) {
+      errorType = "TIMEOUT_ERROR";
+    }
+
     // Save to MongoDB with the folderHref we captured
-    await saveFailedDownload(folderHref, fileNumber, error.message, folderHref);
+    await saveFailedDownload(folderHref, fileNumber, errorType, folderHref);
 
     if (error.message.includes("409")) {
       await sendTelegramMessage(
         `🚨 409 Conflict detected for file #${fileNumber}\nFolder: ${folderHref}`
       );
 
-      // Take screenshot on 409 error
+      // Take screenshot on 409 error with proper dimensions
       try {
         const screenshotPath = path.join(
           config.paths.screenshots,
           `409_error_${fileNumber}_${Date.now()}.png`
         );
-        await page.screenshot({ path: screenshotPath });
+        await page.screenshot({
+          path: screenshotPath,
+          fullPage: false,
+          clip: {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+          },
+        });
         await sendTelegramPhoto(
           screenshotPath,
           `409 Error - File #${fileNumber}`
@@ -774,6 +801,13 @@ async function processFile(page, row, fileNumber) {
           `Failed to take 409 screenshot: ${screenshotError.message}`
         );
       }
+    } else {
+      // For non-409 errors, send different notification
+      await sendTelegramMessage(
+        `⚠️ Error processing file #${fileNumber}\n` +
+          `Type: ${errorType}\n` +
+          `Error: ${error.message.substring(0, 100)}...`
+      );
     }
 
     return { success: false, error: error.message };
