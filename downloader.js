@@ -551,7 +551,17 @@ async function processFile(page, row, fileNumber) {
     stats.failedDownloads++;
 
     // Save to MongoDB
-    await saveFailedDownload(folderHref, fileNumber, error.message, folderHref);
+    // Attempt to extract file URL if possible, fallback to folderHref
+    let fileUrl = folderHref;
+    try {
+      const linkElement = await row.$("a");
+      if (linkElement) {
+        fileUrl = await linkElement.evaluate((el) => el.href);
+      }
+    } catch (e) {
+      // Ignore, fallback to folderHref
+    }
+    await saveFailedDownload(fileUrl, fileNumber, error.message, folderHref);
 
     if (error.message.includes("409")) {
       stats.conflictErrors++;
@@ -577,11 +587,19 @@ async function progressiveScroll(page, targetRow = null) {
       window.scrollBy(0, window.innerHeight * scrollAmount);
     }, 10);
 
-    await page.waitForTimeout(config.delays.scrollStep);
+    // Add a random delay between scrolls for more human-like behavior
+    const minDelay = config.delays.scrollStep;
+    const maxDelay = config.delays.scrollStep + 1500;
+    const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+    await page.waitForTimeout(delay);
 
     if (step % 3 === 0) {
       await Logger.debug(`Scroll progress: ${step}/${scrollSteps}`);
+      // Add a short delay after logging/debugging as well
+      await page.waitForTimeout(700);
     }
+    // General small delay after every step, for reliability
+    await page.waitForTimeout(400);
   }
 
   await page.waitForTimeout(config.delays.verification);
