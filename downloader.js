@@ -59,6 +59,15 @@ const SELECTORS = {
   POPUP_CLOSE: 'button[aria-label="Close"]',
 };
 
+// Progressive scroll configuration from old script
+const PROGRESSIVE_SCROLL_CONFIG = {
+  DOM_WAIT_DELAY: 6000,
+  PRE_SCROLL_DELAY: 12000,
+  SCROLL_BATCH_SIZE: 10,
+  SCROLL_STEP_DELAY: 3000,
+  VERIFICATION_DELAY: 3000,
+};
+
 // Initialize services
 puppeteer.use(stealth);
 const bot = new TelegramBot(config.telegram.token, { polling: true });
@@ -388,12 +397,14 @@ async function downloadWithWget(downloadUrl, filename, fileNumber) {
   });
 }
 
-// Network interception for download URL
-async function interceptDownloadUrl(page, fileNumber) {
+// Network interception for download URL with better 409 detection
+async function interceptDownloadUrl(page, fileNumber, folderUrl) {
   return new Promise((resolve, reject) => {
     let downloadUrlCaptured = false;
+    let conflict409Detected = false;
+
     const timeout = setTimeout(() => {
-      if (!downloadUrlCaptured) {
+      if (!downloadUrlCaptured && !conflict409Detected) {
         reject(new Error("Download URL capture timeout"));
       }
     }, config.delays.downloadTimeout);
@@ -411,17 +422,35 @@ async function interceptDownloadUrl(page, fileNumber) {
         return;
       }
 
-      // Check for 409 Conflict
+      // Enhanced 409 Conflict detection
       if (status === 409) {
+        await Logger.error(
+          `409 CONFLICT detected for file #${fileNumber} - URL: ${url}`
+        );
+        conflict409Detected = true;
         downloadUrlCaptured = true;
         clearTimeout(timeout);
         page.off("response", responseHandler);
+
+        // Save to MongoDB immediately
+        await saveFailedDownload(
+          folderUrl || url,
+          fileNumber,
+          "409_CONFLICT",
+          folderUrl
+        );
+        stats.conflictErrors++;
+
         reject(new Error("409_CONFLICT"));
         return;
       }
 
       // Check for download API response
-      if (status === 200 && url.includes("generate_download_url")) {
+      if (
+        status === 200 &&
+        url.includes("generate_download_url") &&
+        !downloadUrlCaptured
+      ) {
         try {
           const responseText = await response.text();
           const responseData = JSON.parse(responseText);
@@ -431,7 +460,13 @@ async function interceptDownloadUrl(page, fileNumber) {
             clearTimeout(timeout);
             page.off("response", responseHandler);
 
-            const filename = `file_${fileNumber}.zip`;
+            let filename = `file_${fileNumber}.zip`;
+            const urlParts = responseData.download_url.split("/");
+            const lastPart = urlParts[urlParts.length - 1];
+            if (lastPart && lastPart.includes(".")) {
+              filename = lastPart.split("?")[0];
+            }
+
             resolve({ downloadUrl: responseData.download_url, filename });
           }
         } catch (error) {
@@ -461,45 +496,204 @@ async function handlePopups(page) {
   }
 }
 
+// Human-like progressive scroll with proper delays
+async function performProgressiveScroll(page, targetFileNumber) {
+  if (targetFileNumber <= 1) {
+    await Logger.log("No progressive scroll needed - starting from beginning");
+    return;
+  }
+
+  await Logger.log(
+    `Starting progressive scroll to reach file #${targetFileNumber}`
+  );
+  await sendTelegramMessage(
+    `🔄 Starting progressive scroll to file #${targetFileNumber}`
+  );
+
+  // Wait for initial DOM to be ready
+  await Logger.log(
+    `Waiting ${
+      PROGRESSIVE_SCROLL_CONFIG.DOM_WAIT_DELAY / 1000
+    } seconds for DOM to stabilize...`
+  );
+  await page.waitForTimeout(PROGRESSIVE_SCROLL_CONFIG.DOM_WAIT_DELAY);
+
+  // Pre-scroll delay
+  await Logger.log(
+    `Pre-scroll delay: Waiting ${
+      PROGRESSIVE_SCROLL_CONFIG.PRE_SCROLL_DELAY / 1000
+    } seconds...`
+  );
+  await page.waitForTimeout(PROGRESSIVE_SCROLL_CONFIG.PRE_SCROLL_DELAY);
+
+  // Calculate scroll steps needed
+  const estimatedScrollSteps = Math.ceil(
+    targetFileNumber / PROGRESSIVE_SCROLL_CONFIG.SCROLL_BATCH_SIZE
+  );
+  await Logger.log(`Estimated scroll steps needed: ${estimatedScrollSteps}`);
+
+  let currentVisibleFiles = 0;
+  let previousVisibleFiles = 0;
+  let noNewFilesCount = 0;
+
+  for (let step = 1; step <= estimatedScrollSteps + 5; step++) {
+    // Add extra steps as buffer
+    await Logger.log(`Progressive scroll step ${step}`);
+
+    // Human-like scroll using browser API
+    await page.evaluate(() => {
+      // Smooth scroll like a human would
+      window.scrollBy({
+        top: window.innerHeight * 0.8,
+        behavior: "smooth",
+      });
+    });
+
+    // Random delay between 3-5 seconds to simulate human reading
+    const randomDelay =
+      PROGRESSIVE_SCROLL_CONFIG.SCROLL_STEP_DELAY + Math.random() * 2000;
+    await Logger.log(
+      `Waiting ${Math.round(
+        randomDelay
+      )}ms for DOM to lazy load after scroll step...`
+    );
+    await page.waitForTimeout(randomDelay);
+
+    // Check loaded files every few steps
+    if (step % 3 === 0 || step >= estimatedScrollSteps) {
+      try {
+        await page.waitForSelector(SELECTORS.FILE_ROW_CONTAINER, {
+          timeout: 5000,
+        });
+
+        const rowGroups = await page.$$(SELECTORS.FILE_ROW_CONTAINER);
+        if (rowGroups.length >= 2) {
+          const fileContainer = rowGroups[1];
+          const visibleRows = await fileContainer.$$(SELECTORS.FILE_ROW);
+          currentVisibleFiles = visibleRows.length;
+
+          await Logger.log(
+            `Found ${currentVisibleFiles} visible file rows after step ${step}`
+          );
+
+          // Check if we've loaded enough files
+          if (currentVisibleFiles >= targetFileNumber) {
+            await Logger.success(
+              `Target reached! ${currentVisibleFiles} files visible, need ${targetFileNumber}`
+            );
+            break;
+          }
+
+          // Check if no new files loaded
+          if (currentVisibleFiles === previousVisibleFiles) {
+            noNewFilesCount++;
+            if (noNewFilesCount >= 3) {
+              await Logger.warning(
+                "No new files loading after 3 attempts, continuing anyway"
+              );
+              break;
+            }
+          } else {
+            noNewFilesCount = 0;
+          }
+
+          previousVisibleFiles = currentVisibleFiles;
+        }
+
+        // Additional wait after verification
+        await page.waitForTimeout(PROGRESSIVE_SCROLL_CONFIG.VERIFICATION_DELAY);
+      } catch (verificationError) {
+        await Logger.warning(
+          `Verification warning at step ${step}: ${verificationError.message}`
+        );
+      }
+    }
+
+    // Send progress update every 5 steps
+    if (step % 5 === 0) {
+      await sendTelegramMessage(
+        `📜 Scroll progress: ${currentVisibleFiles} files loaded, target: ${targetFileNumber}`
+      );
+    }
+  }
+
+  // Final verification
+  await Logger.log("Final scroll verification...");
+  await page.waitForTimeout(PROGRESSIVE_SCROLL_CONFIG.VERIFICATION_DELAY);
+
+  try {
+    const rowGroups = await page.$$(SELECTORS.FILE_ROW_CONTAINER);
+    if (rowGroups.length >= 2) {
+      const fileContainer = rowGroups[1];
+      const finalRows = await fileContainer.$$(SELECTORS.FILE_ROW);
+      await Logger.success(
+        `Progressive scroll completed: ${finalRows.length} files now visible`
+      );
+
+      if (finalRows.length < targetFileNumber) {
+        await Logger.warning(
+          `Only ${finalRows.length} files loaded, but need file #${targetFileNumber}`
+        );
+        await sendTelegramMessage(
+          `⚠️ Only ${finalRows.length} files loaded, but need file #${targetFileNumber}`
+        );
+      }
+    }
+  } catch (error) {
+    await Logger.error(`Final verification error: ${error.message}`);
+  }
+}
+
 // Process individual file
 async function processFile(page, row, fileNumber) {
   await Logger.log(`Processing file #${fileNumber}`);
   stats.totalProcessed++;
 
+  // Initialize folderHref early to avoid undefined error
+  let folderHref = "UNKNOWN";
+
   try {
     // Save progress
     await saveResumePoint(fileNumber);
 
-    // Extract folder href
-    let folderHref = "UNKNOWN";
+    // Extract folder href first
     try {
       const linkElement = await row.$("a");
       if (linkElement) {
         folderHref = await linkElement.evaluate((el) => el.href);
+        await Logger.debug(`Extracted folder href: ${folderHref}`);
       }
     } catch (e) {
       await Logger.debug(`Could not extract folder href: ${e.message}`);
     }
 
-    // Hover to reveal download button
-    await row.hover();
-    await page.waitForTimeout(800);
+    // Hover to reveal download button with retries
+    let downloadButton = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await Logger.debug(`Hover attempt ${attempt} for file #${fileNumber}`);
+      await row.hover();
+      await page.waitForTimeout(1000);
 
-    // Find and click download button
-    const downloadButton = await row.$(SELECTORS.HOVER_DOWNLOAD_BUTTON);
-    if (!downloadButton) {
-      throw new Error("Download button not found");
+      downloadButton = await row.$(SELECTORS.HOVER_DOWNLOAD_BUTTON);
+      if (downloadButton) break;
     }
 
-    // Set up download interception
-    const downloadPromise = interceptDownloadUrl(page, fileNumber);
+    if (!downloadButton) {
+      throw new Error("Download button not found after 3 attempts");
+    }
+
+    // Set up download interception with folder URL
+    const downloadPromise = interceptDownloadUrl(page, fileNumber, folderHref);
 
     // Click download button
     await downloadButton.click();
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(1500);
 
     // Handle popup and find continue button
     await page.waitForSelector(SELECTORS.CONTINUE_BUTTON, { timeout: 10000 });
+
+    // Wait a bit for popup to fully render
+    await page.waitForTimeout(2000);
 
     // Find the specific continue button
     const continueButton = await page.evaluateHandle(() => {
@@ -507,7 +701,13 @@ async function processFile(page, row, fileNumber) {
         'button[data-dig-button="true"]'
       );
       for (const button of buttons) {
-        if (button.textContent.includes("continue with download only")) {
+        const spanElement = button.querySelector(
+          'span[data-dig-button-content="true"]'
+        );
+        if (
+          spanElement &&
+          spanElement.textContent.includes("continue with download only")
+        ) {
           return button;
         }
       }
@@ -550,61 +750,34 @@ async function processFile(page, row, fileNumber) {
     );
     stats.failedDownloads++;
 
-    // Save to MongoDB
-    // Attempt to extract file URL if possible, fallback to folderHref
-    let fileUrl = folderHref;
-    try {
-      const linkElement = await row.$("a");
-      if (linkElement) {
-        fileUrl = await linkElement.evaluate((el) => el.href);
-      }
-    } catch (e) {
-      // Ignore, fallback to folderHref
-    }
-    await saveFailedDownload(fileUrl, fileNumber, error.message, folderHref);
+    // Save to MongoDB with the folderHref we captured
+    await saveFailedDownload(folderHref, fileNumber, error.message, folderHref);
 
     if (error.message.includes("409")) {
-      stats.conflictErrors++;
       await sendTelegramMessage(
-        `🚨 409 Conflict detected for file #${fileNumber}`
+        `🚨 409 Conflict detected for file #${fileNumber}\nFolder: ${folderHref}`
       );
+
+      // Take screenshot on 409 error
+      try {
+        const screenshotPath = path.join(
+          config.paths.screenshots,
+          `409_error_${fileNumber}_${Date.now()}.png`
+        );
+        await page.screenshot({ path: screenshotPath });
+        await sendTelegramPhoto(
+          screenshotPath,
+          `409 Error - File #${fileNumber}`
+        );
+      } catch (screenshotError) {
+        await Logger.error(
+          `Failed to take 409 screenshot: ${screenshotError.message}`
+        );
+      }
     }
 
     return { success: false, error: error.message };
   }
-}
-
-// Progressive scroll
-async function progressiveScroll(page, targetRow = null) {
-  await Logger.log("Starting progressive scroll");
-
-  if (!targetRow) return;
-
-  const scrollSteps = Math.ceil(targetRow / 10);
-
-  for (let step = 1; step <= scrollSteps; step++) {
-    await page.evaluate((scrollAmount) => {
-      window.scrollBy(0, window.innerHeight * scrollAmount);
-    }, 10);
-
-    // Add a random delay between scrolls for more human-like behavior
-    // Increase delay for lazy loading
-    const minDelay = 3000; // 3s
-    const maxDelay = 5000; // 5s
-    const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
-    await Logger.log(`Waiting ${delay}ms for DOM to lazy load after scroll step...`);
-    await page.waitForTimeout(delay);
-
-    if (step % 3 === 0) {
-      await Logger.debug(`Scroll progress: ${step}/${scrollSteps}`);
-      // Add a short delay after logging/debugging as well
-      await page.waitForTimeout(700);
-    }
-    // General small delay after every step, for reliability
-    await page.waitForTimeout(400);
-  }
-
-  await page.waitForTimeout(config.delays.verification);
 }
 
 // Main browser session
@@ -659,13 +832,19 @@ async function runBrowserSession(startFrom = 1) {
       await Logger.debug("No cookie consent found");
     }
 
-    // Wait for DOM
+    // Wait for initial DOM
+    await Logger.log(
+      `Waiting ${config.delays.domWait / 1000} seconds for initial DOM load...`
+    );
     await page.waitForTimeout(config.delays.domWait);
 
     // Progressive scroll if resuming
     if (startFrom > 1) {
-      await progressiveScroll(page, startFrom);
+      await performProgressiveScroll(page, startFrom);
     }
+
+    // Additional wait after scroll
+    await page.waitForTimeout(3000);
 
     // Get file rows
     const rowGroups = await page.$$(SELECTORS.FILE_ROW_CONTAINER);
@@ -677,16 +856,34 @@ async function runBrowserSession(startFrom = 1) {
     const allRows = await fileContainer.$$(SELECTORS.FILE_ROW);
     await Logger.log(`Found ${allRows.length} files to process`);
 
-    let processedInSession = 0;
-    const maxFiles = allRows.length;
-const sessionLimit = config.limits.maxFoldersPerSession;
+    // Check if we have enough files loaded
+    if (allRows.length < startFrom) {
+      await Logger.error(
+        `Only ${allRows.length} files loaded, but trying to start from file #${startFrom}`
+      );
+      await sendTelegramMessage(
+        `⚠️ Only ${allRows.length} files loaded, but need to start from #${startFrom}`
+      );
 
-// Process files
-for (
-  let i = startFrom - 1;
-  i < maxFiles && processedInSession < sessionLimit;
-  i++
-) {
+      // Process what we have
+      if (allRows.length === 0) {
+        throw new Error("No files found to process");
+      }
+    }
+
+    let processedInSession = 0;
+    const startIndex = Math.min(startFrom - 1, allRows.length - 1);
+    const maxFiles = Math.min(
+      allRows.length,
+      startIndex + config.limits.maxFoldersPerSession
+    );
+
+    // Process files
+    for (
+      let i = startIndex;
+      i < maxFiles && processedInSession < config.limits.maxFoldersPerSession;
+      i++
+    ) {
       try {
         // Check for popups periodically
         if (i % 5 === 0) {
@@ -694,9 +891,13 @@ for (
         }
 
         const row = allRows[i];
-        if (!row) continue;
+        if (!row) {
+          await Logger.warning(`No row found at index ${i}`);
+          continue;
+        }
 
-        await processFile(page, row, i + 1);
+        const fileNumber = i + 1;
+        await processFile(page, row, fileNumber);
         processedInSession++;
 
         // Small delay between files
