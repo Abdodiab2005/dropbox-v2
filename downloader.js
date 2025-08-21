@@ -44,7 +44,7 @@ const config = {
     downloadTimeout: Number.parseInt(process.env.DOWNLOAD_TIMEOUT || 30000),
   },
   browser: {
-    headless: process.env.HEADLESS === "true",
+    headless: "new",
     userDataDir: process.env.USER_DATA_DIR,
   },
 };
