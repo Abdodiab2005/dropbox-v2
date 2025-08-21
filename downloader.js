@@ -588,9 +588,11 @@ async function progressiveScroll(page, targetRow = null) {
     }, 10);
 
     // Add a random delay between scrolls for more human-like behavior
-    const minDelay = config.delays.scrollStep;
-    const maxDelay = config.delays.scrollStep + 1500;
+    // Increase delay for lazy loading
+    const minDelay = 3000; // 3s
+    const maxDelay = 5000; // 5s
     const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+    await Logger.log(`Waiting ${delay}ms for DOM to lazy load after scroll step...`);
     await page.waitForTimeout(delay);
 
     if (step % 3 === 0) {
