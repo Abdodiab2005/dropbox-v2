@@ -676,17 +676,15 @@ async function runBrowserSession(startFrom = 1) {
     await Logger.log(`Found ${allRows.length} files to process`);
 
     let processedInSession = 0;
-    const maxFiles = Math.min(
-      allRows.length,
-      config.limits.maxFoldersPerSession
-    );
+    const maxFiles = allRows.length;
+const sessionLimit = config.limits.maxFoldersPerSession;
 
-    // Process files
-    for (
-      let i = startFrom - 1;
-      i < maxFiles && processedInSession < config.limits.maxFoldersPerSession;
-      i++
-    ) {
+// Process files
+for (
+  let i = startFrom - 1;
+  i < maxFiles && processedInSession < sessionLimit;
+  i++
+) {
       try {
         // Check for popups periodically
         if (i % 5 === 0) {
