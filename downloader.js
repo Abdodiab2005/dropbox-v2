@@ -503,7 +503,7 @@ async function handlePopups(page) {
   }
 }
 
-// Human-like progressive scroll with proper delays
+// Progressive scroll function using logic from old script
 async function performProgressiveScroll(page, targetFileNumber) {
   if (targetFileNumber <= 1) {
     await Logger.log("No progressive scroll needed - starting from beginning");
@@ -511,15 +511,12 @@ async function performProgressiveScroll(page, targetFileNumber) {
   }
 
   await Logger.log(
-    `Starting progressive scroll to reach file #${targetFileNumber}`
-  );
-  await sendTelegramMessage(
-    `🔄 Starting progressive scroll to file #${targetFileNumber}`
+    `🔄 Starting progressive scroll to reach file #${targetFileNumber}`
   );
 
-  // Wait for initial DOM to be ready
+  // Wait for DOM to be ready
   await Logger.log(
-    `Waiting ${
+    `⏳ Waiting ${
       PROGRESSIVE_SCROLL_CONFIG.DOM_WAIT_DELAY / 1000
     } seconds for DOM to stabilize...`
   );
@@ -527,128 +524,131 @@ async function performProgressiveScroll(page, targetFileNumber) {
 
   // Pre-scroll delay
   await Logger.log(
-    `Pre-scroll delay: Waiting ${
+    `⏳ Pre-scroll delay: Waiting ${
       PROGRESSIVE_SCROLL_CONFIG.PRE_SCROLL_DELAY / 1000
-    } seconds...`
+    } seconds before starting scroll...`
+  );
+  await sendTelegramMessage(
+    `🔄 Starting progressive scroll to file #${targetFileNumber}`
   );
   await page.waitForTimeout(PROGRESSIVE_SCROLL_CONFIG.PRE_SCROLL_DELAY);
 
-  // Calculate scroll steps needed
+  // Calculate approximate scroll steps needed
   const estimatedScrollSteps = Math.ceil(
     targetFileNumber / PROGRESSIVE_SCROLL_CONFIG.SCROLL_BATCH_SIZE
   );
-  await Logger.log(`Estimated scroll steps needed: ${estimatedScrollSteps}`);
+  await Logger.log(`📊 Estimated scroll steps needed: ${estimatedScrollSteps}`);
 
-  let currentVisibleFiles = 0;
-  let previousVisibleFiles = 0;
-  let noNewFilesCount = 0;
-
-  for (let step = 1; step <= estimatedScrollSteps + 5; step++) {
-    // Add extra steps as buffer
-    await Logger.log(`Progressive scroll step ${step}`);
-
-    // Human-like scroll using browser API
-    await page.evaluate(() => {
-      // Smooth scroll like a human would
-      window.scrollBy({
-        top: window.innerHeight * 0.8,
-        behavior: "smooth",
-      });
-    });
-
-    // Random delay between 3-5 seconds to simulate human reading
-    const randomDelay =
-      PROGRESSIVE_SCROLL_CONFIG.SCROLL_STEP_DELAY + Math.random() * 2000;
+  // Progressive scrolling with verification
+  for (let step = 1; step <= estimatedScrollSteps; step++) {
     await Logger.log(
-      `Waiting ${Math.round(
-        randomDelay
-      )}ms for DOM to lazy load after scroll step...`
+      `📜 Progressive scroll step ${step}/${estimatedScrollSteps}`
     );
-    await page.waitForTimeout(randomDelay);
 
-    // Check loaded files every few steps
-    if (step % 3 === 0 || step >= estimatedScrollSteps) {
+    // Scroll by batch size
+    await page.evaluate((scrollBatchSize) => {
+      const scrollAmount = window.innerHeight * (scrollBatchSize / 10); // Adjust scroll amount
+      window.scrollBy(0, scrollAmount);
+    }, PROGRESSIVE_SCROLL_CONFIG.SCROLL_BATCH_SIZE);
+
+    // Wait for content to load
+    await page.waitForTimeout(PROGRESSIVE_SCROLL_CONFIG.SCROLL_STEP_DELAY);
+
+    // Verify elements are loaded every few steps
+    if (step % 3 === 0 || step === estimatedScrollSteps) {
+      await Logger.log(`🔍 Verifying elements after scroll step ${step}...`);
+
       try {
+        // Wait for file container to be present
         await page.waitForSelector(SELECTORS.FILE_ROW_CONTAINER, {
           timeout: 5000,
         });
 
-        const rowGroups = await page.$$(SELECTORS.FILE_ROW_CONTAINER);
+        // Check how many rows are visible
+        const rowGroups = await page.$(SELECTORS.FILE_ROW_CONTAINER);
         if (rowGroups.length >= 2) {
           const fileContainer = rowGroups[1];
-          const visibleRows = await fileContainer.$$(SELECTORS.FILE_ROW);
-          currentVisibleFiles = visibleRows.length;
-
+          const visibleRows = await fileContainer.$(SELECTORS.FILE_ROW);
           await Logger.log(
-            `Found ${currentVisibleFiles} visible file rows after step ${step}`
+            `✅ Found ${visibleRows.length} visible file rows after step ${step}`,
+            "SUCCESS"
           );
 
-          // Check if we've loaded enough files
-          if (currentVisibleFiles >= targetFileNumber) {
-            await Logger.success(
-              `Target reached! ${currentVisibleFiles} files visible, need ${targetFileNumber}`
-            );
-            break;
-          }
-
-          // Check if no new files loaded
-          if (currentVisibleFiles === previousVisibleFiles) {
-            noNewFilesCount++;
-            if (noNewFilesCount >= 3) {
-              await Logger.warning(
-                "No new files loading after 3 attempts, continuing anyway"
-              );
-              break;
-            }
-          } else {
-            noNewFilesCount = 0;
-          }
-
-          previousVisibleFiles = currentVisibleFiles;
+          // Take verification screenshot
+          const screenshotPath = path.join(
+            config.paths.screenshots,
+            `progressive_scroll_step_${step}_${Date.now()}.png`
+          );
+          await page.screenshot({
+            path: screenshotPath,
+            fullPage: false,
+            clip: {
+              x: 0,
+              y: 0,
+              width: 1920,
+              height: 1080,
+            },
+          });
         }
 
-        // Additional wait after verification
+        // Additional verification delay
         await page.waitForTimeout(PROGRESSIVE_SCROLL_CONFIG.VERIFICATION_DELAY);
       } catch (verificationError) {
         await Logger.warning(
-          `Verification warning at step ${step}: ${verificationError.message}`
+          `⚠️ Verification warning at step ${step}: ${verificationError.message}`
         );
       }
     }
 
-    // Send progress update every 5 steps
+    // Send progress update to Telegram every 5 steps
     if (step % 5 === 0) {
       await sendTelegramMessage(
-        `📜 Scroll progress: ${currentVisibleFiles} files loaded, target: ${targetFileNumber}`
+        `📜 Progressive scroll progress: ${step}/${estimatedScrollSteps} steps completed`
       );
     }
   }
 
-  // Final verification
-  await Logger.log("Final scroll verification...");
+  // Final verification and stabilization
+  await Logger.log(`🎯 Progressive scroll completed. Final verification...`);
   await page.waitForTimeout(PROGRESSIVE_SCROLL_CONFIG.VERIFICATION_DELAY);
 
   try {
-    const rowGroups = await page.$$(SELECTORS.FILE_ROW_CONTAINER);
+    const rowGroups = await page.$(SELECTORS.FILE_ROW_CONTAINER);
     if (rowGroups.length >= 2) {
       const fileContainer = rowGroups[1];
-      const finalRows = await fileContainer.$$(SELECTORS.FILE_ROW);
-      await Logger.success(
-        `Progressive scroll completed: ${finalRows.length} files now visible`
+      const finalRows = await fileContainer.$(SELECTORS.FILE_ROW);
+      await Logger.log(
+        `✅ Final verification: ${finalRows.length} file rows are now visible`,
+        "SUCCESS"
       );
 
-      if (finalRows.length < targetFileNumber) {
-        await Logger.warning(
-          `Only ${finalRows.length} files loaded, but need file #${targetFileNumber}`
-        );
-        await sendTelegramMessage(
-          `⚠️ Only ${finalRows.length} files loaded, but need file #${targetFileNumber}`
-        );
-      }
+      // Take final verification screenshot
+      const finalScreenshotPath = path.join(
+        config.paths.screenshots,
+        `progressive_scroll_final_${targetFileNumber}_${Date.now()}.png`
+      );
+      await page.screenshot({
+        path: finalScreenshotPath,
+        fullPage: true,
+      });
+
+      await sendTelegramMessage(
+        `✅ Progressive scroll to file #${targetFileNumber} completed successfully!`
+      );
     }
-  } catch (error) {
-    await Logger.error(`Final verification error: ${error.message}`);
+  } catch (finalVerificationError) {
+    await Logger.warning(
+      `⚠️ Final verification warning: ${finalVerificationError.message}`
+    );
+    await sendTelegramMessage(
+      `⚠️ Progressive scroll completed but with verification warnings`
+    );
   }
+
+  await Logger.log(
+    `🎉 Progressive scroll process completed for file #${targetFileNumber}`,
+    "SUCCESS"
+  );
 }
 
 // Process individual file
