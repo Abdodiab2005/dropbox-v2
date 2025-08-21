@@ -880,15 +880,49 @@ async function runBrowserSession(startFrom = 1) {
     // Additional wait after scroll
     await page.waitForTimeout(3000);
 
-    // Get file rows
-    const rowGroups = await page.$$(SELECTORS.FILE_ROW_CONTAINER);
+    // Get file rows with better debugging
+    const rowGroups = await page.$(SELECTORS.FILE_ROW_CONTAINER);
+    await Logger.log(`Found ${rowGroups.length} row groups on page`, "DEBUG");
+
     if (rowGroups.length < 2) {
+      // Try alternative selector
+      await Logger.error(
+        "Could not find file container with standard selector, trying alternatives..."
+      );
+
+      // Debug: log page structure
+      const tableCount = await page.$eval(
+        'div[role="table"]',
+        (tables) => tables.length
+      );
+      const rowGroupCount = await page.$eval(
+        'div[role="rowgroup"]',
+        (groups) => groups.length
+      );
+      await Logger.log(
+        `Page has ${tableCount} tables and ${rowGroupCount} rowgroups`,
+        "DEBUG"
+      );
+
       throw new Error("Could not find file container");
     }
 
     const fileContainer = rowGroups[1];
-    const allRows = await fileContainer.$$(SELECTORS.FILE_ROW);
+    const allRows = await fileContainer.$(SELECTORS.FILE_ROW);
     await Logger.log(`Found ${allRows.length} files to process`);
+
+    // Debug: Check if there's a load more button
+    const loadMoreButton = await page.$(
+      'button:has-text("Load more"), button:has-text("Show more"), [aria-label*="load more"]'
+    );
+    if (loadMoreButton) {
+      await Logger.warning('Found a "Load More" button - clicking it');
+      await loadMoreButton.click();
+      await page.waitForTimeout(3000);
+      // Re-get rows after clicking
+      const updatedRows = await fileContainer.$(SELECTORS.FILE_ROW);
+      await Logger.log(`After clicking Load More: ${updatedRows.length} files`);
+    }
 
     // Check if we have enough files loaded
     if (allRows.length < startFrom) {
