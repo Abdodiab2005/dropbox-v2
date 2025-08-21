@@ -1,0 +1,33 @@
+{
+  "name": "dropbox-downloader",
+  "version": "1.0.0",
+  "description": "Automated Dropbox file downloader with Puppeteer",
+  "main": "downloader.js",
+  "scripts": {
+    "start": "node downloader.js",
+    "dev": "nodemon downloader.js",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop all",
+    "pm2:restart": "pm2 restart all",
+    "pm2:logs": "pm2 logs"
+  },
+  "keywords": [
+    "dropbox",
+    "downloader",
+    "puppeteer",
+    "automation"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "puppeteer": "^21.6.1",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "mongodb": "^6.3.0",
+    "node-telegram-bot-api": "^0.64.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
